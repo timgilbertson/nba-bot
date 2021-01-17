@@ -26,30 +26,30 @@ class Agent:
     """
     NBA fantasty team bot
     """
-    def __init__(self, state_size, action_size, strategy="t-dqn", reset_every=1000, pretrained=False, model_name=None):
+    def __init__(self, action_size, state_size: int = 10, strategy="dqn", reset_every=1000, pretrained=False, model_name=None):
         self.strategy = strategy
 
         # agent config
         self.state_size = state_size
         self.action_size = action_size
         self.model_name = model_name
-        self.team = []
-        self.maxlen = 1000
+        self.maxlen = 10000
         self.memory = deque(maxlen=self.maxlen)
 
         # configure the team
+        self.players = list(range(0, self.action_size))
         self.point_guards = []
         self.shooting_guards = []
         self.small_forwards = []
         self.power_forwards = []
-        self.centre = []
+        self.centres = []
 
         # model config
         self.model_name = model_name
-        self.gamma = 1
-        self.epsilon = 0.75
-        self.epsilon_min = 0.0
-        self.epsilon_decay = 0.99
+        self.gamma = 0.5
+        self.epsilon = 1
+        self.epsilon_min = 0.25
+        self.epsilon_decay = 0.99999
         self.learning_rate = 0.0001
         self.loss = huber_loss
         self.custom_objects = {"huber_loss": huber_loss}  # important for loading the model from memory
@@ -94,14 +94,18 @@ class Agent:
         For a given state, pick players from the action space
         """
         if not is_eval and random.uniform(0, 1) <= self.epsilon:
-            self.team.append(random.sample(self.point_guards, 2))
-            self.team.append(random.sample(self.shooting_guards, 2))
-            self.team.append(random.sample(self.small_forwards, 2))
-            self.team.append(random.sample(self.power_forwards, 2))
-            self.team.append(random.sample(self.centre, 1))
+            # self.team.append(random.sample(self.point_guards, 2))
+            # self.team.append(random.sample(self.shooting_guards, 2))
+            # self.team.append(random.sample(self.small_forwards, 2))
+            # self.team.append(random.sample(self.power_forwards, 2))
+            # self.team.append(random.sample(self.centres, 1))
+            return random.sample(self.players, 9), [1] * 9
         else:
             action_probs = self.model.predict(state)
-            self.team.append(list(np.argpartition(action_probs[0], -9)))
+            # Add a function to optimize a team picking from each position, not just the best 9 players
+            # include their salaries and keep below the $60k salary cap
+            players = action_probs[0].argsort()[-9:][::-1]
+            return (players).tolist(), (action_probs[0][players]).tolist()
 
 
     def train_experience_replay(self, batch_size):
@@ -176,7 +180,7 @@ class Agent:
         return loss
 
     def save(self, episode):
-        self.model.save("models/{}_{}".format(self.model_name, episode))
+        self.model.save(f"models/model_{episode}")
 
     def load(self):
         return load_model("models/" + self.model_name, custom_objects=self.custom_objects)
