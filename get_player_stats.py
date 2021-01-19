@@ -1,6 +1,7 @@
 from basketball_reference_web_scraper import client
 from basketball_reference_web_scraper.data import Position
 import pandas as pd
+import numpy as np
 from typing import Tuple
 
 
@@ -28,13 +29,13 @@ def _download_player_stats():
 
 
 def get_player_stats() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    player_stats = pd.read_pickle("player_stats.pkl")
+    player_stats = pd.read_pickle("player_stats.pkl").drop(columns=["slug", "team", "location", "outcome", "attempted_field_goals", "attempted_three_point_field_goals", "attempted_free_throws", "personal_fouls", "game_score", "opponent"])
 
     player_stats = _calculate_FD_points(player_stats)
-    player_stats = _transform_player_data(player_stats)
+    # player_stats = _transform_player_data(player_stats)
 
-    train_data = player_stats[(player_stats["game_date"] >= "2018-10-01") & (player_stats["game_date"] < "2019-10-01")]
-    test_data = player_stats[(player_stats["game_date"] >= "2019-10-01") & (player_stats["game_date"] < "2021-01-16")]
+    train_data = player_stats[(player_stats["game_date"] >= "2017-10-01") & (player_stats["game_date"] < "2019-10-01")].pipe(_transform_player_data)
+    test_data = player_stats[(player_stats["game_date"] >= "2019-10-01") & (player_stats["game_date"] < "2021-01-16")].pipe(_transform_player_data)
     eval_data = pd.DataFrame()
     future_test_data = pd.DataFrame()
 
@@ -56,10 +57,12 @@ def _calculate_FD_points(player_stats: pd.DataFrame) -> pd.DataFrame:
 
 
 def _transform_player_data(player_stats: pd.DataFrame) -> pd.DataFrame:
-    output_frame = player_stats.copy(deep=True)[["game_date"]].drop_duplicates()
-    for player in set(player_stats["name"]):
-        temp_player_frame = player_stats[player_stats["name"] == player][["game_date", "FD_points", "seconds_played"]].rename(columns={"FD_points": f"{player}"})
-        if (temp_player_frame[f"{player}"].dropna().median() < 38):
-            continue
-        output_frame = output_frame.merge(temp_player_frame.drop(columns="seconds_played"), how="outer", on="game_date").fillna(0)
+    game_dates = player_stats.copy(deep=True)[["game_date"]].drop_duplicates()
+    player_set = set(player_stats["name"])
+    column_list = player_stats.columns
+    output_frame = pd.DataFrame(columns=column_list[1:], index=player_set)
+    for player in player_set:
+        temp_player_frame = player_stats[player_stats["name"] == player].merge(game_dates, on="game_date", how="right").fillna(0).sort_values(by="game_date")
+        for column in column_list[1:]:
+            output_frame.loc[f"{player}", f"{column}"] = temp_player_frame[column].to_list()
     return output_frame

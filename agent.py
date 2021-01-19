@@ -33,7 +33,7 @@ class Agent:
         self.state_size = state_size
         self.action_size = action_size
         self.model_name = model_name
-        self.maxlen = 10000
+        self.maxlen = 1000
         self.memory = deque(maxlen=self.maxlen)
 
         # configure the team
@@ -46,10 +46,10 @@ class Agent:
 
         # model config
         self.model_name = model_name
-        self.gamma = 0.5
+        self.gamma = 0.01
         self.epsilon = 1
         self.epsilon_min = 0.25
-        self.epsilon_decay = 0.99999
+        self.epsilon_decay = 0.99
         self.learning_rate = 0.0001
         self.loss = huber_loss
         self.custom_objects = {"huber_loss": huber_loss}  # important for loading the model from memory
@@ -76,6 +76,7 @@ class Agent:
         model = Sequential()
         model.add(Dense(units=128, activation="relu", input_dim=self.state_size))
         model.add(Dense(units=256, activation="relu"))
+        model.add(Dense(units=512, activation="tanh"))
         model.add(Dense(units=256, activation="relu"))
         model.add(Dense(units=128, activation="relu"))
         model.add(Dense(units=self.action_size))

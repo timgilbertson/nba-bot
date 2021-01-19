@@ -24,13 +24,9 @@ def get_state(data, t, n_days):
     res_list = []
     for column in data:
         column_list = data[column].to_list()
-        block = column_list[d: t + 1] if d >= 0 else -d * [column_list[0]] + column_list[0: t + 1]  # pad with t0
+        block = column_list + [column_list[0]]
         res = []
         for i in range(n_days - 1):
             res.append(sigmoid(block[i + 1] - block[i]))
         res_list.append(res)
     return np.array(res_list)
-
-
-def _calc_moving_average(data: pd.DataFrame):
-    import pdb; pdb.set_trace()
