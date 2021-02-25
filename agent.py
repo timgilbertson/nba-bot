@@ -33,7 +33,7 @@ class Agent:
         self.state_size = state_size
         self.action_size = action_size
         self.model_name = model_name
-        self.maxlen = 1000
+        self.maxlen = 100000
         self.memory = deque(maxlen=self.maxlen)
 
         # configure the team
@@ -46,10 +46,10 @@ class Agent:
 
         # model config
         self.model_name = model_name
-        self.gamma = 0.01
+        self.gamma = 0.5
         self.epsilon = 1
         self.epsilon_min = 0.25
-        self.epsilon_decay = 0.99
+        self.epsilon_decay = 1
         self.learning_rate = 0.0001
         self.loss = huber_loss
         self.custom_objects = {"huber_loss": huber_loss}  # important for loading the model from memory
@@ -110,8 +110,7 @@ class Agent:
 
 
     def train_experience_replay(self, batch_size):
-        """
-        Train on previous experiences in memory
+        """Train on previous experiences in memory
         """
         mini_batch = random.sample(self.memory, batch_size)
 
@@ -124,13 +123,15 @@ class Agent:
                     target = reward
                 else:
                     # approximate deep q-learning equation
-                    target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])
+                    target = reward + self.gamma * np.amax(self.model.predict(next_state)[-1])
 
+                # estimate q-values based on current state
                 q_values = self.model.predict(state)
-                q_values[0][action] = target
+                # update the target for current action based on discounted reward
 
-                X_train.append(state[0])
-                y_train.append(q_values[0])
+                # import pdb; pdb.set_trace()
+                X_train.append(state)
+                y_train.append(q_values)
 
         # DQN with fixed targets
         elif self.strategy == "t-dqn":
@@ -142,39 +143,47 @@ class Agent:
                 if done:
                     target = reward
                 else:
-                    target = reward + self.gamma * np.amax(self.target_model.predict(next_state)[0])
+                    # approximate deep q-learning equation with fixed targets
+                    target = reward + self.gamma * np.amax(self.target_model.predict(next_state)[-1])
 
+                # estimate q-values based on current state
                 q_values = self.model.predict(state)
+                # update the target for current action based on discounted reward
                 q_values[0][action] = target
 
-                X_train.append(state[0])
-                y_train.append(q_values[0])
+                X_train.append(state)
+                y_train.append(q_values)
 
         # Double DQN
         elif self.strategy == "double-dqn":
             if self.n_iter % self.reset_every == 0:
+                # reset target model weights
                 self.target_model.set_weights(self.model.get_weights())
 
             for state, action, reward, next_state, done in mini_batch:
                 if done:
                     target = reward
                 else:
-                    target = reward + self.gamma * self.target_model.predict(next_state)[0][np.argmax(self.model.predict(next_state)[0])]
+                    # approximate double deep q-learning equation
+                    target = reward + self.gamma * self.target_model.predict(next_state)[0][np.argmax(self.model.predict(next_state)[-1])]
 
+                # estimate q-values based on current state
                 q_values = self.model.predict(state)
+                # update the target for current action based on discounted reward
                 q_values[0][action] = target
 
-                X_train.append(state[0])
-                y_train.append(q_values[0])
+                X_train.append(state)
+                y_train.append(q_values)
                 
         else:
             raise NotImplementedError()
 
-        loss = self.model.fit(
-            np.array(X_train), np.array(y_train),
-            epochs=1, verbose=0
-        ).history["loss"][0]
+        # update q-function parameters based on huber loss gradient
+        import pdb; pdb.set_trace()
+        loss = self.model.fit(np.array(X_train).flatten(), np.array(y_train).flatten(), epochs=1, verbose=0).history["loss"][0]
 
+        # as the training goes on we want the agent to
+        # make less random and more optimal decisions
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 

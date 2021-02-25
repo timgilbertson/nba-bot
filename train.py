@@ -43,8 +43,7 @@ def main(batch_size, ep_count,
     Args: [python train.py --help]
     """
     train_data, test_data, _, _ = get_player_stats()
-    no_of_players = len(train_data.columns) - 1
-    logging.info(f"{no_of_players} players in the model")
+    no_of_players = train_data.shape[0]
 
     agent = Agent(action_size=no_of_players, strategy=strategy, pretrained=pretrained, model_name=model_name)
 
@@ -53,7 +52,7 @@ def main(batch_size, ep_count,
 
     for episode in range(1, ep_count + 1):
         train_result = train_model(agent, episode, train_data, ep_count=ep_count, batch_size=batch_size)
-        val_result, _ = evaluate_model(agent, test_data, debug, test_data["game_date"].to_list())
+        val_result, _ = evaluate_model(agent, test_data, debug, test_data[:, 10, :].tolist())
         _show_train_result(train_result, val_result)
 
 

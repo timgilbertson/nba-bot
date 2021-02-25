@@ -3,6 +3,8 @@ from basketball_reference_web_scraper.data import Position
 import pandas as pd
 import numpy as np
 from typing import Tuple
+import logging
+import coloredlogs
 
 
 def _download_player_stats():
@@ -28,18 +30,30 @@ def _download_player_stats():
     player_stats.to_pickle("player_stats.pkl")
 
 
-def get_player_stats() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    player_stats = pd.read_pickle("player_stats.pkl").drop(columns=["slug", "team", "location", "outcome", "attempted_field_goals", "attempted_three_point_field_goals", "attempted_free_throws", "personal_fouls", "game_score", "opponent"])
+def get_player_stats() -> Tuple[np.array, np.array, pd.DataFrame, pd.DataFrame]:
+    player_stats = pd.read_pickle("player_stats.pkl").drop(
+        columns=[
+            "slug",
+            "team",
+            "location",
+            "outcome",
+            "attempted_field_goals",
+            "attempted_three_point_field_goals",
+            "attempted_free_throws",
+            "personal_fouls",
+            "game_score",
+            "opponent",
+        ]
+    )
 
     player_stats = _calculate_FD_points(player_stats)
-    # player_stats = _transform_player_data(player_stats)
 
-    train_data = player_stats[(player_stats["game_date"] >= "2017-10-01") & (player_stats["game_date"] < "2019-10-01")].pipe(_transform_player_data)
-    test_data = player_stats[(player_stats["game_date"] >= "2019-10-01") & (player_stats["game_date"] < "2021-01-16")].pipe(_transform_player_data)
+    train_data = player_stats.copy().pipe(_transform_player_data)
+    test_data = train_data[:, :, -184:]
     eval_data = pd.DataFrame()
     future_test_data = pd.DataFrame()
 
-    return test_data, train_data, eval_data, future_test_data
+    return train_data, test_data, eval_data, future_test_data
 
 
 def _calculate_FD_points(player_stats: pd.DataFrame) -> pd.DataFrame:
@@ -59,10 +73,83 @@ def _calculate_FD_points(player_stats: pd.DataFrame) -> pd.DataFrame:
 def _transform_player_data(player_stats: pd.DataFrame) -> pd.DataFrame:
     game_dates = player_stats.copy(deep=True)[["game_date"]].drop_duplicates()
     player_set = set(player_stats["name"])
+    logging.info(f"{len(player_set)} Players in the Model")
+    logging.info(f"{len(game_dates)} Games in the Model")
     column_list = player_stats.columns
     output_frame = pd.DataFrame(columns=column_list[1:], index=player_set)
+    output_array = []
     for player in player_set:
-        temp_player_frame = player_stats[player_stats["name"] == player].merge(game_dates, on="game_date", how="right").fillna(0).sort_values(by="game_date")
+        temp_player_frame = (
+            player_stats[player_stats["name"] == player]
+            .merge(game_dates, on="game_date", how="right")
+            .fillna(0)
+            .sort_values(by="game_date")
+        )
         for column in column_list[1:]:
-            output_frame.loc[f"{player}", f"{column}"] = temp_player_frame[column].to_list()
-    return output_frame
+            output_frame.loc[f"{player}", f"{column}"] = np.array(temp_player_frame[column])
+
+    for _, row in output_frame.iterrows():
+        output_array.append(np.array(row.to_list()))
+    return np.array(output_array)
+
+
+def build_NN_player_stats() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    player_stats = pd.read_pickle("player_stats.pkl").drop(
+        columns=[
+            "slug",
+            "team",
+            "location",
+            "outcome",
+            "attempted_field_goals",
+            "attempted_three_point_field_goals",
+            "attempted_free_throws",
+            "personal_fouls",
+            "game_score",
+            "opponent",
+        ]
+    )
+    player_stats = player_stats[player_stats["seconds_played"] > 500]
+    player_stats = _calculate_FD_points(player_stats)
+    player_stats = (
+        player_stats.sort_values(["name", "game_date"]).groupby("name", group_keys=False).apply(_moving_averages)
+    )
+    train = player_stats[player_stats["game_date"] < "2020-01-01"]
+    test = player_stats[player_stats["game_date"] > "2020-01-01"]
+
+    y_train = train["FD_points"]
+    x_train = train.drop(columns=["FD_points"])
+    y_test = test["FD_points"]
+    x_test = test.drop(columns=["FD_points"])
+
+    return x_train, x_test, y_train, y_test
+
+
+def _moving_averages(player_stats: pd.DataFrame) -> pd.DataFrame:
+    return player_stats.assign(
+        made_three_point_field_goals_avg=player_stats["made_three_point_field_goals"].rolling(5).mean().shift(1),
+        assists_avg=player_stats["assists"].rolling(5).mean().shift(1),
+        blocks_avg=player_stats["blocks"].rolling(5).mean().shift(1),
+        made_field_goals_avg=player_stats["made_field_goals"].rolling(5).mean().shift(1),
+        made_free_throws_avg=player_stats["made_free_throws"].rolling(5).mean().shift(1),
+        offensive_rebounds_avg=player_stats["offensive_rebounds"].rolling(5).mean().shift(1),
+        defensive_rebounds_avg=player_stats["defensive_rebounds"].rolling(5).mean().shift(1),
+        steals_avg=player_stats["steals"].rolling(5).mean().shift(1),
+        turnovers_avg=player_stats["turnovers"].rolling(5).mean().shift(1),
+        FD_points_avg=player_stats["FD_points"].rolling(5).mean().shift(1),
+    )[
+        [
+            "name",
+            "game_date",
+            "made_three_point_field_goals_avg",
+            "assists_avg",
+            "blocks_avg",
+            "made_field_goals_avg",
+            "made_free_throws_avg",
+            "offensive_rebounds_avg",
+            "defensive_rebounds_avg",
+            "steals_avg",
+            "turnovers_avg",
+            "FD_points_avg",
+            "FD_points",
+        ]
+    ].dropna()
