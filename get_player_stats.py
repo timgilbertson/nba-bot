@@ -5,13 +5,19 @@ import numpy as np
 from typing import Tuple
 import logging
 import coloredlogs
+from sklearn.preprocessing import LabelEncoder
+
+rolling_window = 20
 
 
-def _download_player_stats():
+def download_player_stats():
     seasons = [2020, 2019, 2018, 2017]
     schedules = []
+    season_stats = []
     for season in seasons:
         schedules.append(pd.DataFrame(client.season_schedule(season_end_year=season)))
+        season_stats.append(pd.DataFrame(client.players_season_totals(season_end_year=season)))
+    positions = pd.concat(season_stats)[["name", "positions"]]
     schedules = pd.concat(schedules)
     schedules["start_time"] = schedules["start_time"].dt.date
     game_days = pd.DataFrame(data={"game_day": schedules["start_time"].unique().astype(str)})
@@ -25,9 +31,32 @@ def _download_player_stats():
         ).assign(game_date=pd.to_datetime(row["game_day"]))
         player_stats.append(daily_data)
 
-    player_stats = pd.concat(player_stats)
+    player_stats = pd.concat(player_stats).merge(positions, on="name", how="left")
 
     player_stats.to_pickle("player_stats.pkl")
+
+
+def download_team_stats():
+    seasons = [2020, 2019, 2018, 2017]
+    schedules = []
+    for season in seasons:
+        schedules.append(pd.DataFrame(client.season_schedule(season_end_year=season)))
+    schedules = pd.concat(schedules)
+    schedules["start_time"] = schedules["start_time"].dt.date
+    game_days = pd.DataFrame(data={"game_day": schedules["start_time"].unique().astype(str)})
+    game_days["day"] = (game_days["game_day"].str[-2:]).astype(int)
+    game_days["month"] = (game_days["game_day"].str[-5:-3]).astype(int)
+    game_days["year"] = (game_days["game_day"].str[:4]).astype(int)
+    team_stats = []
+    for _, row in game_days.iterrows():
+        daily_data = pd.DataFrame(client.team_box_scores(day=row["day"], month=row["month"], year=row["year"])).assign(
+            game_date=pd.to_datetime(row["game_day"])
+        )
+        team_stats.append(daily_data)
+
+    team_stats = pd.concat(team_stats)
+
+    team_stats.to_pickle("team_stats.pkl")
 
 
 def get_player_stats() -> Tuple[np.array, np.array, pd.DataFrame, pd.DataFrame]:
@@ -47,7 +76,6 @@ def get_player_stats() -> Tuple[np.array, np.array, pd.DataFrame, pd.DataFrame]:
     )
 
     player_stats = _calculate_FD_points(player_stats)
-
     train_data = player_stats.copy().pipe(_transform_player_data)
     test_data = train_data[:, :, -184:]
     eval_data = pd.DataFrame()
@@ -93,26 +121,54 @@ def _transform_player_data(player_stats: pd.DataFrame) -> pd.DataFrame:
     return np.array(output_array)
 
 
-def build_NN_player_stats() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_NN_stats() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     player_stats = pd.read_pickle("player_stats.pkl").drop(
         columns=[
             "slug",
             "team",
             "location",
             "outcome",
-            "attempted_field_goals",
             "attempted_three_point_field_goals",
-            "attempted_free_throws",
             "personal_fouls",
             "game_score",
-            "opponent",
         ]
     )
+    player_stats["positions"] = (
+        player_stats["positions"]
+        .astype(str)
+        .map(
+            {
+                "[<Position.POINT_GUARD: 'POINT GUARD'>]": "point_guard",
+                "[<Position.SHOOTING_GUARD: 'SHOOTING GUARD'>]": "shooting_guard",
+                "[<Position.SMALL_FORWARD: 'SMALL FORWARD'>]": "small_forward",
+                "[<Position.POWER_FORWARD: 'POWER FORWARD'>]": "power_forward",
+                "[<Position.CENTER: 'CENTER'>]": "center",
+            }
+        )
+    )
+    team_stats = pd.read_pickle("team_stats.pkl")[
+        ["team", "game_date", "points", "minutes_played", "attempted_field_goals", "attempted_free_throws", "turnovers", "defensive_rebounds"]
+    ].rename(
+        columns={
+            "team": "opponent",
+            "minutes_played": "team_minutes",
+            "attempted_field_goals": "team_attempted_field_goals",
+            "attempted_free_throws": "team_attempted_free_throws",
+            "turnovers": "team_turnovers",
+            "defensive_rebounds": "team_defensive_rebounds",
+        }
+    )
+    team_stats["opponent"] = team_stats["opponent"].astype(str)
+    player_stats["opponent"] = player_stats["opponent"].astype(str)
+    team_stats = team_stats.sort_values(by="game_date").groupby("opponent", group_keys=False).apply(_team_averages)
+    player_stats = player_stats.merge(team_stats, on=["opponent", "game_date"], how="left").drop_duplicates()
     player_stats = player_stats[player_stats["seconds_played"] > 500]
-    player_stats = _calculate_FD_points(player_stats)
+
+    player_stats = _calculate_FD_points(player_stats).pipe(_calculate_usage)
     player_stats = (
         player_stats.sort_values(["name", "game_date"]).groupby("name", group_keys=False).apply(_moving_averages)
     )
+    player_stats = _calculate_salary(player_stats)
     train = player_stats[player_stats["game_date"] < "2020-01-01"]
     test = player_stats[player_stats["game_date"] > "2020-01-01"]
 
@@ -124,21 +180,59 @@ def build_NN_player_stats() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, p
     return x_train, x_test, y_train, y_test
 
 
+def _calculate_usage(player_stats: pd.DataFrame) -> pd.DataFrame:
+    player_stats["usage"] = 100 * (
+        (
+            (
+                (player_stats["attempted_field_goals"])
+                + 0.44 * (player_stats["attempted_free_throws"])
+                + (player_stats["turnovers"])
+            )
+        )
+        * (player_stats["team_minutes"])
+        / (
+            (
+                (player_stats["team_attempted_field_goals"])
+                + 0.44 * (player_stats["team_attempted_free_throws"])
+                + player_stats["team_turnovers"]
+            )
+            * 5
+            * (player_stats["seconds_played"] / 60)
+        )
+    )
+    return player_stats
+
+
+def _calculate_salary(player_stats: pd.DataFrame) -> pd.DataFrame:
+    player_stats["salary"] = (
+        3258
+        + 178 * player_stats["FD_points_avg"]
+        + -33.7 * player_stats["FD_points_avg"] ** 2
+        + 2.69 * player_stats["FD_points_avg"] ** 3
+        + -0.0857 * player_stats["FD_points_avg"] ** 4
+        + 1.23e-03 * player_stats["FD_points_avg"] ** 5
+        + -6.68e-06 * player_stats["FD_points_avg"] ** 6
+    )
+    return player_stats
+
+
 def _moving_averages(player_stats: pd.DataFrame) -> pd.DataFrame:
     return player_stats.assign(
-        made_three_point_field_goals_avg=player_stats["made_three_point_field_goals"].rolling(5).mean().shift(1),
-        assists_avg=player_stats["assists"].rolling(5).mean().shift(1),
-        blocks_avg=player_stats["blocks"].rolling(5).mean().shift(1),
-        made_field_goals_avg=player_stats["made_field_goals"].rolling(5).mean().shift(1),
-        made_free_throws_avg=player_stats["made_free_throws"].rolling(5).mean().shift(1),
-        offensive_rebounds_avg=player_stats["offensive_rebounds"].rolling(5).mean().shift(1),
-        defensive_rebounds_avg=player_stats["defensive_rebounds"].rolling(5).mean().shift(1),
-        steals_avg=player_stats["steals"].rolling(5).mean().shift(1),
-        turnovers_avg=player_stats["turnovers"].rolling(5).mean().shift(1),
-        FD_points_avg=player_stats["FD_points"].rolling(5).mean().shift(1),
+        made_three_point_field_goals_avg=player_stats["made_three_point_field_goals"].rolling(rolling_window).mean().shift(1),
+        assists_avg=player_stats["assists"].rolling(rolling_window).mean().shift(1),
+        blocks_avg=player_stats["blocks"].rolling(rolling_window).mean().shift(1),
+        made_field_goals_avg=player_stats["made_field_goals"].rolling(rolling_window).mean().shift(1),
+        made_free_throws_avg=player_stats["made_free_throws"].rolling(rolling_window).mean().shift(1),
+        offensive_rebounds_avg=player_stats["offensive_rebounds"].rolling(rolling_window).mean().shift(1),
+        defensive_rebounds_avg=player_stats["defensive_rebounds"].rolling(rolling_window).mean().shift(1),
+        steals_avg=player_stats["steals"].rolling(rolling_window).mean().shift(1),
+        turnovers_avg=player_stats["turnovers"].rolling(rolling_window).mean().shift(1),
+        usage_avg=player_stats["usage"].rolling(rolling_window).mean().shift(1),
+        FD_points_avg=player_stats["FD_points"].rolling(rolling_window).mean().shift(1),
     )[
         [
             "name",
+            "positions",
             "game_date",
             "made_three_point_field_goals_avg",
             "assists_avg",
@@ -150,6 +244,25 @@ def _moving_averages(player_stats: pd.DataFrame) -> pd.DataFrame:
             "steals_avg",
             "turnovers_avg",
             "FD_points_avg",
+            "usage_avg",
             "FD_points",
+            "pace",
+            "team_defensive_rebounds_avg",
+            "team_attempted_free_throws_avg",
+            "team_attempted_field_goals_avg",
+
         ]
     ].dropna()
+
+
+def _team_averages(team_stats: pd.DataFrame) -> pd.DataFrame:
+    return team_stats.assign(
+        pace=team_stats["points"].rolling(rolling_window).mean().shift(1),
+        team_defensive_rebounds_avg=team_stats["team_defensive_rebounds"].rolling(rolling_window).mean().shift(1),
+        team_attempted_free_throws_avg=team_stats["team_attempted_free_throws"].rolling(rolling_window).mean().shift(1),
+        team_attempted_field_goals_avg=team_stats["team_attempted_field_goals"].rolling(rolling_window).mean().shift(1),
+    )
+
+
+if __name__ == "__main__":
+    download_player_stats()
